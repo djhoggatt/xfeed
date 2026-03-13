@@ -1,0 +1,6 @@
+.venv/
+build/
+src/xfeed/__pycache__/
+src/xfeed/providers/__pycache__/
+src/xfeed.egg-info/
+*.json
