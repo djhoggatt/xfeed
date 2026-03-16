@@ -95,6 +95,27 @@ def render_tweet_detail(tweet: TweetView) -> str:
     return "\n".join(lines)
 
 
+def render_reply_detail(
+    source_tweet: TweetView,
+    reply: TweetView | None,
+    *,
+    reply_index: int = 0,
+    loaded_reply_count: int = 0,
+) -> str:
+    lines = [
+        f"Replies to {source_tweet.author_name} (@{source_tweet.author_handle})",
+        source_tweet.url,
+    ]
+    if reply is None:
+        lines.extend(["", "No replies loaded."])
+        return "\n".join(lines)
+
+    lines.append(f"Reply {reply_index + 1} of {max(loaded_reply_count, reply_index + 1)} loaded")
+    lines.append("")
+    lines.append(render_tweet_detail(reply))
+    return "\n".join(lines)
+
+
 def format_media_summary(tweet: TweetView) -> str:
     if not tweet.media:
         return "·"

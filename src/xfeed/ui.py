@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import time
 import webbrowser
+from dataclasses import dataclass
 from pathlib import Path
 
 from xfeed.feed import FeedController
@@ -13,7 +14,7 @@ from xfeed.media import (
     wait_for_keypress,
 )
 from xfeed.models import TweetView
-from xfeed.render import render_feed_list, render_tweet_detail
+from xfeed.render import render_feed_list, render_reply_detail, render_tweet_detail
 
 try:
     from textual.app import App, ComposeResult
@@ -24,6 +25,13 @@ except ImportError as exc:  # pragma: no cover - exercised only when dependency 
     raise RuntimeError(
         "textual is not installed. Install project dependencies first."
     ) from exc
+
+
+@dataclass(slots=True)
+class ReplyContext:
+    source_tweet: TweetView
+    replies: list[TweetView]
+    index: int
 
 
 class FeedApp(App[None]):
@@ -80,6 +88,11 @@ class FeedApp(App[None]):
         Binding("p", "load_previous", "Newer"),
         Binding("r", "refresh_feed", "Refresh"),
         Binding("f", "toggle_mode", "Mode"),
+        Binding("enter", "toggle_replies", "Replies", show=False),
+        Binding("backspace", "reply_back", "Back", show=False),
+        Binding("escape", "exit_reply_mode", "Exit", show=False),
+        Binding("left", "previous_reply", "Previous reply", show=False),
+        Binding("right", "next_reply", "Next reply", show=False),
         Binding("i", "show_images", "Images"),
         Binding("o", "open_tweet", "Open"),
     ]
@@ -91,6 +104,11 @@ class FeedApp(App[None]):
         self._page_start = 0
         self._status = "Loading feed..."
         self._image_view_cooldown_until = 0.0
+        self._reply_mode = False
+        self._reply_source_tweet: TweetView | None = None
+        self._reply_tweets: list[TweetView] = []
+        self._reply_index = 0
+        self._reply_stack: list[ReplyContext] = []
 
     def compose(self) -> ComposeResult:
         yield Static(id="topbar", classes="bar")
@@ -109,16 +127,24 @@ class FeedApp(App[None]):
         self._render()
 
     def action_move_down(self) -> None:
+        if self._reply_mode:
+            return
         if self.selected_index < self._page_end_index():
             self.selected_index += 1
             self._render()
 
     def action_move_up(self) -> None:
+        if self._reply_mode:
+            return
         if self.selected_index > self._page_start:
             self.selected_index -= 1
             self._render()
 
     async def action_load_more(self) -> None:
+        if self._reply_mode:
+            self._status = self._status_line("Use Left/Right to navigate replies.")
+            self._render()
+            return
         page_size = self._page_size()
         target_start = self._page_start + page_size
         try:
@@ -144,6 +170,10 @@ class FeedApp(App[None]):
         self._render()
 
     def action_load_previous(self) -> None:
+        if self._reply_mode:
+            self._status = self._status_line("Use Left/Right to navigate replies.")
+            self._render()
+            return
         page_size = self._page_size()
         if self._page_start <= 0:
             self._status = self._status_line("No newer tweets available.")
@@ -154,6 +184,10 @@ class FeedApp(App[None]):
         self._render()
 
     async def action_refresh_feed(self) -> None:
+        if self._reply_mode:
+            self._status = self._status_line("Exit reply mode to refresh the feed.")
+            self._render()
+            return
         try:
             added = await self.controller.refresh()
             if added == 0:
@@ -167,6 +201,12 @@ class FeedApp(App[None]):
         self._render()
 
     async def action_toggle_mode(self) -> None:
+        if self._reply_mode:
+            self._status = self._status_line(
+                f"Exit reply mode to switch {self.controller.toggle_label}."
+            )
+            self._render()
+            return
         try:
             next_value = await self.controller.toggle_view()
             self._page_start = 0
@@ -176,8 +216,66 @@ class FeedApp(App[None]):
             self._status = f"Error: {exc}"
         self._render()
 
+    async def action_toggle_replies(self) -> None:
+        tweet = self._active_tweet()
+        if tweet is None:
+            return
+        try:
+            await self._enter_reply_context(tweet)
+        except Exception as exc:  # pragma: no cover - runtime dependency path
+            self._status = f"Error: {exc}"
+        self._render()
+
+    def action_reply_back(self) -> None:
+        if not self._reply_mode:
+            return
+        if self._reply_stack:
+            context = self._reply_stack.pop()
+            self._reply_source_tweet = context.source_tweet
+            self._reply_tweets = context.replies
+            self._reply_index = context.index
+            self._status = self._status_line(
+                f"Back to reply {self._reply_index + 1} of {len(self._reply_tweets)}."
+            )
+            self._render()
+            return
+        self.action_exit_reply_mode()
+
+    def action_exit_reply_mode(self) -> None:
+        if not self._reply_mode:
+            return
+        self._reply_mode = False
+        self._reply_source_tweet = None
+        self._reply_tweets = []
+        self._reply_index = 0
+        self._reply_stack.clear()
+        self._status = self._status_line("Exited reply mode.")
+        self._render()
+
+    def action_previous_reply(self) -> None:
+        if not self._reply_mode:
+            return
+        if self._reply_index <= 0:
+            return
+        self._reply_index -= 1
+        self._status = self._status_line(
+            f"Showing reply {self._reply_index + 1} of {len(self._reply_tweets)}."
+        )
+        self._render()
+
+    async def action_next_reply(self) -> None:
+        if not self._reply_mode:
+            return
+        if self._reply_index + 1 >= len(self._reply_tweets):
+            return
+        self._reply_index += 1
+        self._status = self._status_line(
+            f"Showing reply {self._reply_index + 1} of {len(self._reply_tweets)}."
+        )
+        self._render()
+
     def action_open_tweet(self) -> None:
-        tweet = self._current_tweet()
+        tweet = self._active_tweet()
         if tweet is None:
             return
         webbrowser.open(tweet.url)
@@ -187,7 +285,7 @@ class FeedApp(App[None]):
     def action_show_images(self) -> None:
         if time.monotonic() < self._image_view_cooldown_until:
             return
-        tweet = self._current_tweet()
+        tweet = self._active_tweet()
         if tweet is None:
             return
         image_paths: list[Path] = []
@@ -220,7 +318,15 @@ class FeedApp(App[None]):
         status_widget = self.query_one("#status", Static)
         helpbar_widget = self.query_one("#helpbar", Static)
         topbar_widget.update(
-            f"xfeed  ·  {self.controller.title}  ·  {len(self.controller.tweets)} tweets"
+            "xfeed"
+            f"  ·  {self.controller.title}"
+            f"  ·  {len(self.controller.tweets)} tweets"
+            + (
+                f"  ·  replies {len(self._reply_tweets)}"
+                f"  ·  depth {len(self._reply_stack) + 1}"
+                if self._reply_mode
+                else ""
+            )
         )
         self._page_start = min(self._page_start, self._max_page_start())
         self.selected_index = self._clamp_selected_index(self.selected_index)
@@ -235,16 +341,51 @@ class FeedApp(App[None]):
                 max_items=page_size,
             )
         )
-        tweet = self._current_tweet()
-        detail_widget.update(
-            render_tweet_detail(tweet) if tweet is not None else "No tweet selected."
-        )
+        if self._reply_mode:
+            source_tweet = self._reply_source_tweet or self._current_feed_tweet()
+            reply = self._current_reply_tweet()
+            detail_widget.update(
+                render_reply_detail(
+                    source_tweet,
+                    reply,
+                    reply_index=self._reply_index,
+                    loaded_reply_count=len(self._reply_tweets),
+                )
+                if source_tweet is not None
+                else "No tweet selected."
+            )
+        else:
+            tweet = self._current_feed_tweet()
+            detail_widget.update(
+                render_tweet_detail(tweet) if tweet is not None else "No tweet selected."
+            )
         status_widget.update(self._status)
-        helpbar_widget.update(
-            f"j/k move  p newer  n older  r refresh  f {self.controller.toggle_label}  i images  o open  q quit"
-        )
+        if self._reply_mode:
+            helpbar_widget.update(
+                "left prev  right next  enter replies  backspace up  esc exit  i images  o open  q quit"
+            )
+        else:
+            helpbar_widget.update(
+                "j/k move  p newer  n older  r refresh  "
+                f"f {self.controller.toggle_label}  enter replies  i images  o open  q quit"
+            )
 
-    def _current_tweet(self) -> TweetView | None:
+    def _active_tweet(self) -> TweetView | None:
+        if self._reply_mode:
+            if self._reply_tweets:
+                self._reply_index = self._clamp_reply_index(self._reply_index)
+                return self._reply_tweets[self._reply_index]
+            if self._reply_source_tweet is not None:
+                return self._reply_source_tweet
+        return self._current_feed_tweet()
+
+    def _current_reply_tweet(self) -> TweetView | None:
+        if not self._reply_tweets:
+            return None
+        self._reply_index = self._clamp_reply_index(self._reply_index)
+        return self._reply_tweets[self._reply_index]
+
+    def _current_feed_tweet(self) -> TweetView | None:
         if not self.controller.tweets:
             return None
         self.selected_index = self._clamp_selected_index(self.selected_index)
@@ -257,6 +398,45 @@ class FeedApp(App[None]):
         list_widget = self.query_one("#feed-list", Static)
         visible_lines = max(list_widget.size.height - 2, 2)
         return max(visible_lines // 2, 1)
+
+    async def _load_initial_replies(self, tweet: TweetView) -> None:
+        page = await self.controller.fetch_replies(tweet.id)
+        replies = [reply for reply in page.tweets if reply.id != tweet.id]
+        seen_ids: set[str] = set()
+        unique_replies: list[TweetView] = []
+        for reply in replies:
+            if reply.id in seen_ids:
+                continue
+            seen_ids.add(reply.id)
+            unique_replies.append(reply)
+        self._reply_source_tweet = tweet
+        self._reply_tweets = unique_replies
+        self._reply_index = 0
+
+    async def _enter_reply_context(self, tweet: TweetView) -> None:
+        previous_context = None
+        if self._reply_mode and self._reply_source_tweet is not None:
+            previous_context = ReplyContext(
+                source_tweet=self._reply_source_tweet,
+                replies=self._reply_tweets.copy(),
+                index=self._reply_index,
+            )
+        await self._load_initial_replies(tweet)
+        if not self._reply_tweets:
+            self._status = self._status_line(
+                f"No replies found for @{tweet.author_handle}."
+            )
+            if previous_context is not None:
+                self._reply_source_tweet = previous_context.source_tweet
+                self._reply_tweets = previous_context.replies
+                self._reply_index = previous_context.index
+            return
+        if previous_context is not None:
+            self._reply_stack.append(previous_context)
+        self._reply_mode = True
+        self._status = self._status_line(
+            f"Showing reply 1 of {len(self._reply_tweets)} for @{tweet.author_handle}."
+        )
 
     def _page_end_index(self) -> int:
         if not self.controller.tweets:
@@ -276,3 +456,8 @@ class FeedApp(App[None]):
         if not self.controller.tweets:
             return 0
         return max(self._page_start, min(selected_index, self._page_end_index()))
+
+    def _clamp_reply_index(self, selected_index: int) -> int:
+        if not self._reply_tweets:
+            return 0
+        return max(0, min(selected_index, len(self._reply_tweets) - 1))

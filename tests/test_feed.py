@@ -9,6 +9,7 @@ from xfeed.models import FeedMode, FeedPage, TweetView, UserTweetType
 class FakeProvider:
     def __init__(self) -> None:
         self.home_calls: list[tuple[FeedMode, str | None, int, list[str] | None]] = []
+        self.reply_calls: list[tuple[str, str | None, int]] = []
         self.user_calls: list[tuple[str, UserTweetType, str | None, int]] = []
 
     async def fetch_home(
@@ -41,6 +42,19 @@ class FakeProvider:
 
     async def fetch_tweet(self, tweet_id: str) -> TweetView:
         return _make_tweet(tweet_id, "alice", "single")
+
+    async def fetch_replies(
+        self,
+        tweet_id: str,
+        *,
+        cursor: str | None,
+        count: int,
+    ) -> FeedPage:
+        self.reply_calls.append((tweet_id, cursor, count))
+        return FeedPage(
+            tweets=[_make_tweet(f"{tweet_id}-reply", "bob", "reply")],
+            next_cursor="reply-next",
+        )
 
 
 def _make_tweet(tweet_id: str, handle: str, text: str) -> TweetView:
@@ -89,3 +103,14 @@ def test_home_controller_toggle_switches_between_modes() -> None:
     assert next_value == "for-you"
     assert provider.home_calls[0][0] is FeedMode.FOLLOWING
     assert provider.home_calls[-1][0] is FeedMode.FOR_YOU
+
+
+def test_controller_fetch_replies_uses_controller_page_size() -> None:
+    provider = FakeProvider()
+    controller = FeedController(provider, mode=FeedMode.FOLLOWING, page_size=7)
+
+    page = asyncio.run(controller.fetch_replies("123", cursor="cursor-1"))
+
+    assert provider.reply_calls == [("123", "cursor-1", 7)]
+    assert page.next_cursor == "reply-next"
+    assert page.tweets[0].text == "reply"

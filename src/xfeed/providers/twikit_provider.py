@@ -8,8 +8,12 @@ from xfeed.providers.base import FeedProvider, ProviderError
 
 try:
     from twikit import Client
+    from twikit.tweet import tweet_from_data
+    from twikit.utils import find_dict
 except ImportError:  # pragma: no cover - exercised only when dependency is missing
     Client = None
+    tweet_from_data = None
+    find_dict = None
 
 
 STATUS_URL_RE = re.compile(
@@ -54,6 +58,34 @@ class TwikitProvider(FeedProvider):
         tweet = await client.get_tweet_by_id(tweet_id)
         return await self._normalize_tweet(tweet, client=client)
 
+    async def fetch_replies(
+        self,
+        tweet_id: str,
+        *,
+        cursor: str | None,
+        count: int,
+    ) -> FeedPage:
+        client = self._get_client()
+        tweets: list[TweetView]
+        next_cursor: str | None
+
+        client_fetcher = getattr(client, "get_tweet_replies", None)
+        if callable(client_fetcher):
+            result = await client_fetcher(tweet_id, count=count, cursor=cursor)
+            tweets = [
+                await self._normalize_tweet(tweet, client=client)
+                for tweet in self._result_items(result)
+                if str(getattr(tweet, "id", "")) != str(tweet_id)
+            ]
+            next_cursor = getattr(result, "next_cursor", None)
+        else:
+            tweets, next_cursor = await self._fetch_replies_from_detail(
+                tweet_id,
+                client=client,
+                cursor=cursor,
+            )
+        return FeedPage(tweets=tweets[:count], next_cursor=next_cursor)
+
     async def fetch_user_timeline(
         self,
         screen_name: str,
@@ -72,6 +104,92 @@ class TwikitProvider(FeedProvider):
         )
         tweets = [await self._normalize_tweet(tweet, client=client) for tweet in result]
         return FeedPage(tweets=tweets, next_cursor=getattr(result, "next_cursor", None))
+
+    async def _fetch_replies_from_detail(
+        self,
+        tweet_id: str,
+        *,
+        client: Any,
+        cursor: str | None,
+    ) -> tuple[list[TweetView], str | None]:
+        if tweet_from_data is None or find_dict is None:
+            raise ProviderError("twikit is not installed. Install project dependencies first.")
+
+        response, _ = await client.gql.tweet_detail(tweet_id, cursor)
+        entries_matches = find_dict(response, "entries", find_one=True)
+        if not entries_matches:
+            return [], None
+        entries = entries_matches[0]
+        replies: list[TweetView] = []
+        seen_ids: set[str] = set()
+
+        for entry in entries:
+            entry_id = str(entry.get("entryId", ""))
+            if entry_id.startswith("cursor"):
+                continue
+
+            entry_reply_tweets = self._tweet_candidates_from_entry(client, entry)
+            for tweet in entry_reply_tweets:
+                normalized = await self._normalize_tweet(tweet, client=client)
+                if normalized.id == str(tweet_id) or normalized.id in seen_ids:
+                    continue
+                seen_ids.add(normalized.id)
+                replies.append(normalized)
+
+        return replies, self._extract_reply_cursor(entries)
+
+    def _result_items(self, result: Any) -> list[Any]:
+        tweets = getattr(result, "tweets", None)
+        if tweets is not None:
+            return list(tweets)
+        return list(result)
+
+    def _tweet_candidates_from_entry(self, client: Any, entry: dict[str, Any]) -> list[Any]:
+        direct_tweet = tweet_from_data(client, entry)
+        if direct_tweet is not None:
+            return [direct_tweet]
+
+        content = entry.get("content")
+        if not isinstance(content, dict):
+            return []
+        items = content.get("items")
+        if not isinstance(items, list):
+            return []
+
+        tweets: list[Any] = []
+        for item in items:
+            if not isinstance(item, dict):
+                continue
+            item_entry_id = str(item.get("entryId", ""))
+            if "tweet" not in item_entry_id:
+                nested = item.get("item")
+                if isinstance(nested, dict):
+                    item = nested
+                    item_entry_id = str(item.get("entryId", ""))
+            if "tweet" not in item_entry_id:
+                continue
+            tweet = tweet_from_data(client, item)
+            if tweet is not None:
+                tweets.append(tweet)
+        return tweets
+
+    def _extract_reply_cursor(self, entries: list[dict[str, Any]]) -> str | None:
+        for entry in reversed(entries):
+            entry_id = str(entry.get("entryId", ""))
+            if not entry_id.startswith("cursor"):
+                continue
+            content = entry.get("content")
+            if not isinstance(content, dict):
+                continue
+            item_content = content.get("itemContent")
+            if isinstance(item_content, dict):
+                value = item_content.get("value")
+                if value:
+                    return str(value)
+            value = content.get("value")
+            if value:
+                return str(value)
+        return None
 
     def _get_client(self):
         if Client is None:

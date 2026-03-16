@@ -89,6 +89,18 @@ class FeedController:
     async def fetch_tweet(self, tweet_id: str) -> TweetView:
         return await self.provider.fetch_tweet(tweet_id)
 
+    async def fetch_replies(
+        self,
+        tweet_id: str,
+        *,
+        cursor: str | None = None,
+    ):
+        return await self.provider.fetch_replies(
+            tweet_id,
+            cursor=cursor,
+            count=self.page_size,
+        )
+
     async def _load_page(self, *, reset: bool) -> None:
         page = await self._fetch_page(
             cursor=None if reset else self.next_cursor,

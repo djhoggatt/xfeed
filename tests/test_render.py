@@ -3,6 +3,7 @@ from xfeed.render import (
     format_media_summary,
     render_feed_list,
     render_plain_feed,
+    render_reply_detail,
     render_tweet_detail,
 )
 
@@ -151,3 +152,61 @@ def test_render_tweet_detail_renders_embedded_quoted_tweet() -> None:
     assert "Bob (@bob)" in rendered
     assert "Quoted tweet body" in rendered
     assert "https://x.com/bob/status/2" in rendered
+
+
+def test_render_reply_detail_includes_header_and_position() -> None:
+    source = TweetView(
+        id="1",
+        author_name="Alice",
+        author_handle="alice",
+        text="Source tweet",
+        created_at="Fri, 13 Mar 2026 12:00:00 +0000",
+        url="https://x.com/alice/status/1",
+    )
+    reply = TweetView(
+        id="3",
+        author_name="Carol",
+        author_handle="carol",
+        text="second reply",
+        created_at="Fri, 13 Mar 2026 12:10:00 +0000",
+        url="https://x.com/carol/status/3",
+    )
+
+    rendered = render_reply_detail(
+        source,
+        reply,
+        reply_index=1,
+        loaded_reply_count=2,
+    )
+
+    assert "Replies to Alice (@alice)" in rendered
+    assert "Reply 2 of 2 loaded" in rendered
+    assert "@carol" in rendered
+
+
+def test_render_reply_detail_keeps_full_reply_text() -> None:
+    source = TweetView(
+        id="1",
+        author_name="Alice",
+        author_handle="alice",
+        text="Source tweet",
+        created_at="Fri, 13 Mar 2026 12:00:00 +0000",
+        url="https://x.com/alice/status/1",
+    )
+    reply = TweetView(
+        id="2",
+        author_name="Bob",
+        author_handle="bob",
+        text="This reply body is intentionally long enough to wrap onto multiple lines.",
+        created_at="Fri, 13 Mar 2026 12:05:00 +0000",
+        url="https://x.com/bob/status/2",
+    )
+
+    rendered = render_reply_detail(
+        source,
+        reply,
+        reply_index=0,
+        loaded_reply_count=1,
+    )
+
+    assert reply.text in rendered

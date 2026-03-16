@@ -26,6 +26,16 @@ class FeedProvider(ABC):
         raise NotImplementedError
 
     @abstractmethod
+    async def fetch_replies(
+        self,
+        tweet_id: str,
+        *,
+        cursor: str | None,
+        count: int,
+    ) -> FeedPage:
+        raise NotImplementedError
+
+    @abstractmethod
     async def fetch_user_timeline(
         self,
         screen_name: str,
