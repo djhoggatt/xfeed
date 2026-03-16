@@ -18,6 +18,34 @@ class FeedMode(StrEnum):
         raise ValueError(f"Unsupported feed mode: {value}")
 
 
+class UserTweetType(StrEnum):
+    POSTS = "posts"
+    REPLIES = "replies"
+    MEDIA = "media"
+    LIKES = "likes"
+
+    @classmethod
+    def from_cli(cls, value: str) -> "UserTweetType":
+        normalized = value.strip().lower()
+        for member in cls:
+            if normalized == member.value:
+                return member
+        raise ValueError(f"Unsupported user tweet type: {value}")
+
+    def to_twikit_type(self) -> str:
+        if self is UserTweetType.POSTS:
+            return "Tweets"
+        if self is UserTweetType.REPLIES:
+            return "Replies"
+        if self is UserTweetType.MEDIA:
+            return "Media"
+        return "Likes"
+
+    def next(self) -> "UserTweetType":
+        order = list(UserTweetType)
+        return order[(order.index(self) + 1) % len(order)]
+
+
 @dataclass(slots=True)
 class MediaItem:
     url: str

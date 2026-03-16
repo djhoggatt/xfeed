@@ -3,11 +3,13 @@ from __future__ import annotations
 from email.utils import parsedate_to_datetime
 from textwrap import shorten
 
-from xfeed.models import FeedMode, TweetView
+from rich.cells import set_cell_size
+
+from xfeed.models import TweetView
 
 
-def render_plain_feed(tweets: list[TweetView], *, mode: FeedMode) -> str:
-    lines = [f"xfeed: {mode.value}", ""]
+def render_plain_feed(tweets: list[TweetView], *, heading: str) -> str:
+    lines = [f"xfeed: {heading}", ""]
     for index, tweet in enumerate(tweets, start=1):
         summary = shorten(_single_line(tweet.text), width=88, placeholder="...")
         lines.append(
@@ -24,18 +26,40 @@ def render_plain_feed(tweets: list[TweetView], *, mode: FeedMode) -> str:
     return "\n".join(lines).rstrip()
 
 
-def render_feed_list(tweets: list[TweetView], *, selected_index: int, width: int = 48) -> str:
+def render_feed_list(
+    tweets: list[TweetView],
+    *,
+    selected_index: int,
+    width: int = 48,
+    start_index: int = 0,
+    max_items: int | None = None,
+) -> str:
     if not tweets:
         return "No tweets loaded yet."
     lines: list[str] = []
-    body_width = max(width - 16, 20)
-    for index, tweet in enumerate(tweets):
+    available_width = max(width, 20)
+    end_index = len(tweets) if max_items is None else start_index + max_items
+    for index, tweet in enumerate(tweets[start_index:end_index], start=start_index):
         marker = "›" if index == selected_index else " "
-        handle = f"@{tweet.author_handle}"
-        summary = shorten(_single_line(tweet.text), width=body_width, placeholder="...")
-        lines.append(f"{marker} {index + 1:>2}. {handle:<18} {summary}")
+        prefix = f"{marker} {index + 1:>2}. "
+        body_width = max(available_width - len(prefix), 12)
+        handle_width = min(18, max(body_width // 3, 8))
+        summary_width = max(body_width - handle_width - 1, 4)
+        handle = set_cell_size(f"@{tweet.author_handle}", handle_width)
+        summary = set_cell_size(
+            shorten(_single_line(tweet.text), width=summary_width, placeholder="..."),
+            summary_width,
+        )
+        lines.append(f"{prefix}{handle} {summary}")
         meta = f"{format_timestamp(tweet.created_at)}  {format_media_summary(tweet)}"
-        lines.append(f"    {shorten(meta, width=max(width - 4, 20), placeholder='...')}")
+        meta_width = max(available_width - 4, 8)
+        lines.append(
+            "    "
+            + set_cell_size(
+                shorten(meta, width=meta_width, placeholder="..."),
+                meta_width,
+            )
+        )
     return "\n".join(lines)
 
 
@@ -67,10 +91,7 @@ def render_tweet_detail(tweet: TweetView) -> str:
     if tweet.quoted_tweet is not None:
         lines.append("")
         lines.append("Quoted Tweet")
-        lines.append(
-            f"@{tweet.quoted_tweet.author_handle}: "
-            f"{shorten(_single_line(tweet.quoted_tweet.text), width=120, placeholder='...')}"
-        )
+        lines.extend(_render_embedded_tweet(tweet.quoted_tweet))
     return "\n".join(lines)
 
 
@@ -109,6 +130,20 @@ def _format_counts(tweet: TweetView) -> str:
 
 def _single_line(value: str) -> str:
     return " ".join(value.split())
+
+
+def _render_embedded_tweet(tweet: TweetView) -> list[str]:
+    lines = [
+        f"  {tweet.author_name} (@{tweet.author_handle})",
+        f"  {format_timestamp(tweet.created_at)}",
+        f"  {tweet.url}",
+        "",
+    ]
+    lines.extend(f"  {line}" if line else "" for line in (tweet.text or "[no text]").splitlines())
+    if tweet.media:
+        lines.append("")
+        lines.append(f"  Media: {format_media_summary(tweet)}")
+    return lines
 
 
 def media_kind_icon(kind: str) -> str:

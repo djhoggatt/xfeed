@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from abc import ABC, abstractmethod
 
-from xfeed.models import FeedMode, FeedPage, TweetView
+from xfeed.models import FeedMode, FeedPage, TweetView, UserTweetType
 
 
 class ProviderError(RuntimeError):
@@ -23,4 +23,15 @@ class FeedProvider(ABC):
 
     @abstractmethod
     async def fetch_tweet(self, tweet_id: str) -> TweetView:
+        raise NotImplementedError
+
+    @abstractmethod
+    async def fetch_user_timeline(
+        self,
+        screen_name: str,
+        tweet_type: UserTweetType,
+        *,
+        cursor: str | None,
+        count: int,
+    ) -> FeedPage:
         raise NotImplementedError

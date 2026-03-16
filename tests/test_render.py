@@ -1,5 +1,10 @@
-from xfeed.models import FeedMode, MediaItem, TweetView
-from xfeed.render import format_media_summary, render_plain_feed
+from xfeed.models import MediaItem, TweetView
+from xfeed.render import (
+    format_media_summary,
+    render_feed_list,
+    render_plain_feed,
+    render_tweet_detail,
+)
 
 
 def test_format_media_summary_counts_items() -> None:
@@ -30,7 +35,119 @@ def test_render_plain_feed_includes_mode_and_url() -> None:
         url="https://x.com/alice/status/1",
     )
 
-    rendered = render_plain_feed([tweet], mode=FeedMode.FOLLOWING)
+    rendered = render_plain_feed([tweet], heading="following")
 
     assert "xfeed: following" in rendered
     assert "https://x.com/alice/status/1" in rendered
+
+
+def test_render_feed_list_shows_multiple_tweets() -> None:
+    tweets = [
+        TweetView(
+            id="1",
+            author_name="Alice",
+            author_handle="alice",
+            text="first",
+            created_at="Fri, 13 Mar 2026 12:00:00 +0000",
+            url="https://x.com/alice/status/1",
+        ),
+        TweetView(
+            id="2",
+            author_name="Bob",
+            author_handle="bob",
+            text="second",
+            created_at="Fri, 13 Mar 2026 12:05:00 +0000",
+            url="https://x.com/bob/status/2",
+        ),
+    ]
+
+    rendered = render_feed_list(tweets, selected_index=1)
+
+    assert "@alice" in rendered
+    assert "@bob" in rendered
+    assert "›  2." in rendered
+
+
+def test_render_feed_list_can_limit_to_one_page() -> None:
+    tweets = [
+        TweetView(
+            id="1",
+            author_name="Alice",
+            author_handle="alice",
+            text="first",
+            created_at="Fri, 13 Mar 2026 12:00:00 +0000",
+            url="https://x.com/alice/status/1",
+        ),
+        TweetView(
+            id="2",
+            author_name="Bob",
+            author_handle="bob",
+            text="second",
+            created_at="Fri, 13 Mar 2026 12:05:00 +0000",
+            url="https://x.com/bob/status/2",
+        ),
+        TweetView(
+            id="3",
+            author_name="Carol",
+            author_handle="carol",
+            text="third",
+            created_at="Fri, 13 Mar 2026 12:10:00 +0000",
+            url="https://x.com/carol/status/3",
+        ),
+    ]
+
+    rendered = render_feed_list(
+        tweets,
+        selected_index=1,
+        start_index=1,
+        max_items=2,
+    )
+
+    assert "@alice" not in rendered
+    assert "@bob" in rendered
+    assert "@carol" in rendered
+
+
+def test_render_feed_list_respects_narrow_width() -> None:
+    tweets = [
+        TweetView(
+            id="1",
+            author_name="Alice",
+            author_handle="verylonghandleexample",
+            text="This is a long tweet summary that should be truncated to fit.",
+            created_at="Fri, 13 Mar 2026 12:00:00 +0000",
+            url="https://x.com/alice/status/1",
+        )
+    ]
+
+    rendered = render_feed_list(tweets, selected_index=0, width=24)
+
+    assert all(len(line) <= 24 for line in rendered.splitlines())
+
+
+def test_render_tweet_detail_renders_embedded_quoted_tweet() -> None:
+    quoted = TweetView(
+        id="2",
+        author_name="Bob",
+        author_handle="bob",
+        text="Quoted tweet body",
+        created_at="Fri, 13 Mar 2026 13:00:00 +0000",
+        url="https://x.com/bob/status/2",
+        media=[MediaItem(url="https://img/1", kind="photo")],
+    )
+    tweet = TweetView(
+        id="1",
+        author_name="Alice",
+        author_handle="alice",
+        text="Main tweet",
+        created_at="Fri, 13 Mar 2026 12:00:00 +0000",
+        url="https://x.com/alice/status/1",
+        quoted_tweet=quoted,
+    )
+
+    rendered = render_tweet_detail(tweet)
+
+    assert "Quoted Tweet" in rendered
+    assert "Bob (@bob)" in rendered
+    assert "Quoted tweet body" in rendered
+    assert "https://x.com/bob/status/2" in rendered

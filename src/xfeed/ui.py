@@ -12,7 +12,7 @@ from xfeed.media import (
     show_images_with_kitty,
     wait_for_keypress,
 )
-from xfeed.models import FeedMode, TweetView
+from xfeed.models import TweetView
 from xfeed.render import render_feed_list, render_tweet_detail
 
 try:
@@ -47,6 +47,7 @@ class FeedApp(App[None]):
 
     #feed-list {
         width: 44%;
+        height: 1fr;
         padding: 1;
         border-right: solid $boost;
         background: transparent;
@@ -55,6 +56,7 @@ class FeedApp(App[None]):
 
     #tweet-detail {
         width: 56%;
+        height: 1fr;
         padding: 1;
         background: transparent;
         overflow: auto auto;
@@ -75,6 +77,7 @@ class FeedApp(App[None]):
         Binding("down", "move_down", "Down", show=False),
         Binding("up", "move_up", "Up", show=False),
         Binding("n", "load_more", "Older"),
+        Binding("p", "load_previous", "Newer"),
         Binding("r", "refresh_feed", "Refresh"),
         Binding("f", "toggle_mode", "Mode"),
         Binding("i", "show_images", "Images"),
@@ -85,6 +88,7 @@ class FeedApp(App[None]):
         super().__init__(ansi_color=True)
         self.controller = controller
         self.selected_index = 0
+        self._page_start = 0
         self._status = "Loading feed..."
         self._image_view_cooldown_until = 0.0
 
@@ -105,24 +109,48 @@ class FeedApp(App[None]):
         self._render()
 
     def action_move_down(self) -> None:
-        if self.selected_index < len(self.controller.tweets) - 1:
+        if self.selected_index < self._page_end_index():
             self.selected_index += 1
             self._render()
 
     def action_move_up(self) -> None:
-        if self.selected_index > 0:
+        if self.selected_index > self._page_start:
             self.selected_index -= 1
             self._render()
 
     async def action_load_more(self) -> None:
+        page_size = self._page_size()
+        target_start = self._page_start + page_size
         try:
-            added = await self.controller.load_more()
-            if added == 0:
+            loaded = 0
+            while target_start >= len(self.controller.tweets):
+                added = await self.controller.load_more()
+                loaded += added
+                if added == 0:
+                    break
+            if target_start >= len(self.controller.tweets):
                 self._status = self._status_line("No older tweets available.")
             else:
-                self._status = self._status_line(f"Loaded {added} older tweets.")
+                self._page_start = target_start
+                self.selected_index = self._page_start
+                if loaded > 0:
+                    self._status = self._status_line(
+                        f"Loaded {loaded} older tweets."
+                    )
+                else:
+                    self._status = self._status_line("Showing older tweets.")
         except Exception as exc:  # pragma: no cover - runtime dependency path
             self._status = f"Error: {exc}"
+        self._render()
+
+    def action_load_previous(self) -> None:
+        page_size = self._page_size()
+        if self._page_start <= 0:
+            self._status = self._status_line("No newer tweets available.")
+        else:
+            self._page_start = max(0, self._page_start - page_size)
+            self.selected_index = self._page_start
+            self._status = self._status_line("Showing newer tweets.")
         self._render()
 
     async def action_refresh_feed(self) -> None:
@@ -131,6 +159,7 @@ class FeedApp(App[None]):
             if added == 0:
                 self._status = self._status_line("No new tweets.")
             else:
+                self._page_start = 0
                 self.selected_index = 0
                 self._status = self._status_line(f"Loaded {added} new tweets.")
         except Exception as exc:  # pragma: no cover - runtime dependency path
@@ -138,15 +167,11 @@ class FeedApp(App[None]):
         self._render()
 
     async def action_toggle_mode(self) -> None:
-        next_mode = (
-            FeedMode.FOR_YOU
-            if self.controller.mode is FeedMode.FOLLOWING
-            else FeedMode.FOLLOWING
-        )
         try:
-            await self.controller.switch_mode(next_mode)
+            next_value = await self.controller.toggle_view()
+            self._page_start = 0
             self.selected_index = 0
-            self._status = self._status_line(f"Switched to {next_mode.value}.")
+            self._status = self._status_line(f"Switched to {next_value}.")
         except Exception as exc:  # pragma: no cover - runtime dependency path
             self._status = f"Error: {exc}"
         self._render()
@@ -195,12 +220,19 @@ class FeedApp(App[None]):
         status_widget = self.query_one("#status", Static)
         helpbar_widget = self.query_one("#helpbar", Static)
         topbar_widget.update(
-            f"xfeed  ·  {self.controller.mode.value}  ·  {len(self.controller.tweets)} tweets"
+            f"xfeed  ·  {self.controller.title}  ·  {len(self.controller.tweets)} tweets"
         )
+        self._page_start = min(self._page_start, self._max_page_start())
+        self.selected_index = self._clamp_selected_index(self.selected_index)
+        page_size = self._page_size()
+        list_width = max(list_widget.content_region.width, 20)
         list_widget.update(
             render_feed_list(
                 self.controller.tweets,
                 selected_index=self.selected_index,
+                width=list_width,
+                start_index=self._page_start,
+                max_items=page_size,
             )
         )
         tweet = self._current_tweet()
@@ -209,14 +241,38 @@ class FeedApp(App[None]):
         )
         status_widget.update(self._status)
         helpbar_widget.update(
-            "j/k move  r refresh  n older  f mode  i images  o open  q quit"
+            f"j/k move  p newer  n older  r refresh  f {self.controller.toggle_label}  i images  o open  q quit"
         )
 
     def _current_tweet(self) -> TweetView | None:
         if not self.controller.tweets:
             return None
-        self.selected_index = max(0, min(self.selected_index, len(self.controller.tweets) - 1))
+        self.selected_index = self._clamp_selected_index(self.selected_index)
         return self.controller.tweets[self.selected_index]
 
     def _status_line(self, message: str) -> str:
-        return f"{self.controller.mode.value} | {len(self.controller.tweets)} tweets | {message}"
+        return f"{self.controller.status_label} | {len(self.controller.tweets)} tweets | {message}"
+
+    def _page_size(self) -> int:
+        list_widget = self.query_one("#feed-list", Static)
+        visible_lines = max(list_widget.size.height - 2, 2)
+        return max(visible_lines // 2, 1)
+
+    def _page_end_index(self) -> int:
+        if not self.controller.tweets:
+            return 0
+        return min(
+            self._page_start + self._page_size(),
+            len(self.controller.tweets),
+        ) - 1
+
+    def _max_page_start(self) -> int:
+        tweet_count = len(self.controller.tweets)
+        if tweet_count <= 0:
+            return 0
+        return max(tweet_count - self._page_size(), 0)
+
+    def _clamp_selected_index(self, selected_index: int) -> int:
+        if not self.controller.tweets:
+            return 0
+        return max(self._page_start, min(selected_index, self._page_end_index()))

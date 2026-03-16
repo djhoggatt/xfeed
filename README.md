@@ -59,12 +59,26 @@ Switch timeline mode:
 xfeed home --mode for-you
 ```
 
+Read a specific user's timeline:
+
+```bash
+xfeed user elonmusk
+```
+
+Choose which user feed to load:
+
+```bash
+xfeed user jack --feed replies
+xfeed user nasa --feed media --plain
+```
+
 ## Keys
 
 - `j` / `k` / `Up` / `Down`: move selection
+- `p`: show the previous page of newer tweets
+- `n`: show the next page of older tweets
 - `r`: refresh newer tweets
-- `n`: fetch older tweets
-- `f`: toggle timeline mode
+- `f`: toggle timeline mode or user feed type
 - `i`: display the selected tweet's first image with `kitten icat`
 - `o`: open the selected tweet in a browser
 - `q`: quit

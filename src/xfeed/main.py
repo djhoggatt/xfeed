@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import sys
+from typing import TextIO
 
 from xfeed.config import SessionStore
 from xfeed.cookies import load_cookie_mapping
@@ -15,7 +16,7 @@ from xfeed.media import (
     show_images_with_kitty,
     wait_for_enter,
 )
-from xfeed.models import FeedMode
+from xfeed.models import FeedMode, UserTweetType
 from xfeed.providers import TwikitProvider
 from xfeed.render import render_plain_feed
 
@@ -49,6 +50,26 @@ def build_parser() -> argparse.ArgumentParser:
         help="Number of tweets to fetch per page.",
     )
     home.add_argument(
+        "--plain",
+        action="store_true",
+        help="Print a plain terminal snapshot instead of launching the TUI.",
+    )
+
+    user = subparsers.add_parser("user", help="Read a specific user's timeline.")
+    user.add_argument("screen_name", help="User handle to load, with or without @.")
+    user.add_argument(
+        "--feed",
+        choices=[member.value for member in UserTweetType],
+        default=UserTweetType.POSTS.value,
+        help="User timeline feed to read.",
+    )
+    user.add_argument(
+        "--count",
+        type=int,
+        default=20,
+        help="Number of tweets to fetch per page.",
+    )
+    user.add_argument(
         "--plain",
         action="store_true",
         help="Print a plain terminal snapshot instead of launching the TUI.",
@@ -95,6 +116,22 @@ def dispatch(args: argparse.Namespace) -> int:
             return asyncio.run(run_plain_home(mode=mode, count=args.count))
         return run_tui_home(mode=mode, count=args.count)
 
+    if args.command == "user":
+        tweet_type = UserTweetType.from_cli(args.feed)
+        if args.plain:
+            return asyncio.run(
+                run_plain_user(
+                    screen_name=args.screen_name,
+                    tweet_type=tweet_type,
+                    count=args.count,
+                )
+            )
+        return run_tui_user(
+            screen_name=args.screen_name,
+            tweet_type=tweet_type,
+            count=args.count,
+        )
+
     if args.command == "show-image":
         return asyncio.run(run_show_image(tweet_id=args.tweet_id, index=args.index))
 
@@ -102,23 +139,55 @@ def dispatch(args: argparse.Namespace) -> int:
 
 
 async def run_plain_home(*, mode: FeedMode, count: int) -> int:
-    controller = build_controller(mode=mode, count=count)
-    tweets = await controller.load_initial()
-    print(render_plain_feed(tweets, mode=mode))
-    return 0
+    controller = build_home_controller(mode=mode, count=count)
+    return await run_plain_controller(controller)
 
 
 def run_tui_home(*, mode: FeedMode, count: int) -> int:
     from xfeed.ui import FeedApp
 
-    controller = build_controller(mode=mode, count=count)
+    controller = build_home_controller(mode=mode, count=count)
     app = FeedApp(controller)
-    app.run()
+    try:
+        app.run()
+    finally:
+        reset_terminal_display()
+    return 0
+
+
+async def run_plain_user(*, screen_name: str, tweet_type: UserTweetType, count: int) -> int:
+    controller = build_user_controller(
+        screen_name=screen_name,
+        tweet_type=tweet_type,
+        count=count,
+    )
+    return await run_plain_controller(controller)
+
+
+def run_tui_user(*, screen_name: str, tweet_type: UserTweetType, count: int) -> int:
+    from xfeed.ui import FeedApp
+
+    controller = build_user_controller(
+        screen_name=screen_name,
+        tweet_type=tweet_type,
+        count=count,
+    )
+    app = FeedApp(controller)
+    try:
+        app.run()
+    finally:
+        reset_terminal_display()
+    return 0
+
+
+async def run_plain_controller(controller: FeedController) -> int:
+    tweets = await controller.load_initial()
+    print(render_plain_feed(tweets, heading=controller.title))
     return 0
 
 
 async def run_show_image(*, tweet_id: str, index: int) -> int:
-    controller = build_controller(mode=FeedMode.FOLLOWING, count=20)
+    controller = build_home_controller(mode=FeedMode.FOLLOWING, count=20)
     tweet = await controller.fetch_tweet(tweet_id)
     if index >= 0:
         image_urls = [select_image(tweet, index=index)]
@@ -135,10 +204,33 @@ async def run_show_image(*, tweet_id: str, index: int) -> int:
     return 0
 
 
-def build_controller(*, mode: FeedMode, count: int) -> FeedController:
+def build_home_controller(*, mode: FeedMode, count: int) -> FeedController:
     cookies = SessionStore().load_cookies()
     provider = TwikitProvider(cookies)
     return FeedController(provider, mode=mode, page_size=count)
+
+
+def build_user_controller(
+    *,
+    screen_name: str,
+    tweet_type: UserTweetType,
+    count: int,
+) -> FeedController:
+    cookies = SessionStore().load_cookies()
+    provider = TwikitProvider(cookies)
+    return FeedController(
+        provider,
+        mode=None,
+        user_screen_name=screen_name,
+        user_tweet_type=tweet_type,
+        page_size=count,
+    )
+
+
+def reset_terminal_display(stream: TextIO | None = None) -> None:
+    target = stream or sys.stdout
+    target.write("\033[2J\033[3J\033[H")
+    target.flush()
 
 
 if __name__ == "__main__":
