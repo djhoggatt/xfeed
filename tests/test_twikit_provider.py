@@ -1,11 +1,16 @@
 from __future__ import annotations
 
 import asyncio
+import json
 from types import SimpleNamespace
 
 from xfeed.models import FeedMode
 from xfeed.models import UserTweetType
-from xfeed.providers.twikit_provider import TwikitProvider
+from xfeed.providers.twikit_provider import (
+    KEY_BYTE_INDICES_ERROR,
+    TwikitProvider,
+    _configure_key_byte_fallback,
+)
 
 
 class FakeTimeline(list):
@@ -218,3 +223,132 @@ def test_fetch_replies_falls_back_to_gql_detail_without_get_tweet_by_id() -> Non
     assert client.gql.calls == [("1", None)]
     assert [tweet.id for tweet in page.tweets] == ["2"]
     assert page.next_cursor == "cursor-2"
+
+
+class FakeHttpResponse:
+    def __init__(self, payload, *, status_code=200):
+        self._payload = payload
+        self.status_code = status_code
+        self.headers = {}
+        if isinstance(payload, str):
+            self.text = payload
+        else:
+            self.text = json.dumps(payload)
+
+    def json(self):
+        if isinstance(self._payload, str):
+            raise json.decoder.JSONDecodeError("invalid", self._payload, 0)
+        return self._payload
+
+
+class FakeHttpTransport:
+    def __init__(self, response):
+        self.response = response
+        self.calls: list[tuple[str, str, dict[str, str]]] = []
+        self.cookies = SimpleNamespace(jar=[])
+
+    async def request(self, method, url, headers=None, **kwargs):
+        self.calls.append((method, url, dict(headers or {})))
+        return self.response
+
+
+class FakeCompatClient:
+    def __init__(self, *, initial_error: Exception | None, response: FakeHttpResponse):
+        self._initial_error = initial_error
+        self.request_attempts = 0
+        self.http = FakeHttpTransport(response)
+        self.captcha_solver = None
+        self.removed_duplicate_ct0 = 0
+        self.http.cookies.jar = [
+            SimpleNamespace(name="auth_token", value="token"),
+        ]
+
+    async def request(self, method, url, auto_unlock=True, raise_exception=True, **kwargs):
+        self.request_attempts += 1
+        if self._initial_error is not None:
+            error = self._initial_error
+            self._initial_error = None
+            raise error
+        return {"unexpected": True}, None
+
+    def get_cookies(self):
+        return {"auth_token": "token"}
+
+    def set_cookies(self, cookies, clear_cookies=False):
+        self.http.cookies.jar = [
+            SimpleNamespace(name=name, value=value) for name, value in dict(cookies).items()
+        ]
+
+    def _remove_duplicate_ct0_cookie(self):
+        self.removed_duplicate_ct0 += 1
+
+    async def _get_user_state(self):
+        return "active"
+
+
+def test_request_falls_back_when_twikit_cannot_get_key_byte_indices() -> None:
+    client = FakeCompatClient(
+        initial_error=Exception(KEY_BYTE_INDICES_ERROR),
+        response=FakeHttpResponse({"ok": True}),
+    )
+    _configure_key_byte_fallback(client)
+
+    result, response = asyncio.run(client.request("GET", "https://x.com/i/api/test"))
+
+    assert result == {"ok": True}
+    assert response.status_code == 200
+    assert client.request_attempts == 1
+    assert client.http.calls == [("GET", "https://x.com/i/api/test", {})]
+    assert client.removed_duplicate_ct0 == 1
+    assert client._xfeed_key_byte_fallback_disabled is True
+
+
+def test_request_reuses_fallback_after_key_byte_failure() -> None:
+    client = FakeCompatClient(
+        initial_error=Exception(KEY_BYTE_INDICES_ERROR),
+        response=FakeHttpResponse({"ok": True}),
+    )
+    _configure_key_byte_fallback(client)
+
+    asyncio.run(client.request("GET", "https://x.com/i/api/test"))
+    asyncio.run(client.request("POST", "https://x.com/i/api/other"))
+
+    assert client.request_attempts == 1
+    assert client.http.calls == [
+        ("GET", "https://x.com/i/api/test", {}),
+        ("POST", "https://x.com/i/api/other", {}),
+    ]
+
+
+def test_request_preserves_non_key_byte_errors() -> None:
+    client = FakeCompatClient(
+        initial_error=ValueError("boom"),
+        response=FakeHttpResponse({"ok": True}),
+    )
+    _configure_key_byte_fallback(client)
+
+    try:
+        asyncio.run(client.request("GET", "https://x.com/i/api/test"))
+    except ValueError as exc:
+        assert str(exc) == "boom"
+    else:  # pragma: no cover - defensive assertion
+        raise AssertionError("Expected ValueError to be re-raised")
+
+
+def test_get_cookies_deduplicates_duplicate_cookie_names() -> None:
+    client = FakeCompatClient(
+        initial_error=None,
+        response=FakeHttpResponse({"ok": True}),
+    )
+    client.http.cookies.jar = [
+        SimpleNamespace(name="guest_id_ads", value="one"),
+        SimpleNamespace(name="guest_id_ads", value="two"),
+        SimpleNamespace(name="auth_token", value="token"),
+    ]
+
+    _configure_key_byte_fallback(client)
+
+    assert client.get_cookies() == {
+        "guest_id_ads": "two",
+        "auth_token": "token",
+    }

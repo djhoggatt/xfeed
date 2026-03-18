@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import re
 from typing import Any
 
@@ -8,10 +9,32 @@ from xfeed.providers.base import FeedProvider, ProviderError
 
 try:
     from twikit import Client
+    from twikit.errors import (
+        AccountLocked,
+        AccountSuspended,
+        BadRequest,
+        Forbidden,
+        NotFound,
+        RequestTimeout,
+        ServerError,
+        TooManyRequests,
+        TwitterException,
+        Unauthorized,
+    )
     from twikit.tweet import tweet_from_data
     from twikit.utils import find_dict
 except ImportError:  # pragma: no cover - exercised only when dependency is missing
     Client = None
+    AccountLocked = None
+    AccountSuspended = None
+    BadRequest = None
+    Forbidden = None
+    NotFound = None
+    RequestTimeout = None
+    ServerError = None
+    TooManyRequests = None
+    TwitterException = None
+    Unauthorized = None
     tweet_from_data = None
     find_dict = None
 
@@ -20,6 +43,136 @@ STATUS_URL_RE = re.compile(
     r"https?://(?:(?:www\.)?(?:x|twitter)\.com)/[^/\s]+/status/(\d+)",
     re.IGNORECASE,
 )
+KEY_BYTE_INDICES_ERROR = "Couldn't get KEY_BYTE indices"
+
+
+def _is_key_byte_indices_error(exc: Exception) -> bool:
+    return KEY_BYTE_INDICES_ERROR in str(exc)
+
+
+def _cookie_mapping_from_jar(client: Any) -> dict[str, str]:
+    cookies: dict[str, str] = {}
+    for cookie in client.http.cookies.jar:
+        cookies[str(cookie.name)] = str(cookie.value)
+    return cookies
+
+
+async def _request_without_transaction(
+    client: Any,
+    method: str,
+    url: str,
+    *,
+    auto_unlock: bool,
+    raise_exception: bool,
+    **kwargs: Any,
+) -> tuple[dict[str, Any] | Any, Any]:
+    headers = kwargs.pop("headers", {})
+    cookies_backup = _cookie_mapping_from_jar(client)
+    response = await client.http.request(method, url, headers=headers, **kwargs)
+    client._remove_duplicate_ct0_cookie()
+
+    try:
+        response_data = response.json()
+    except json.decoder.JSONDecodeError:
+        response_data = response.text
+
+    if isinstance(response_data, dict) and "errors" in response_data:
+        error_code = response_data["errors"][0]["code"]
+        error_message = response_data["errors"][0].get("message")
+        if error_code in (37, 64):
+            raise AccountSuspended(error_message)
+
+        if error_code == 326:
+            if client.captcha_solver is None:
+                raise AccountLocked(
+                    "Your account is locked. Visit "
+                    "https://x.com/account/access to unlock it."
+                )
+            if auto_unlock:
+                await client.unlock()
+                client.set_cookies(cookies_backup, clear_cookies=True)
+                response = await client.http.request(method, url, **kwargs)
+                client._remove_duplicate_ct0_cookie()
+                try:
+                    response_data = response.json()
+                except json.decoder.JSONDecodeError:
+                    response_data = response.text
+
+    status_code = response.status_code
+    if status_code >= 400 and raise_exception:
+        message = f'status: {status_code}, message: "{response.text}"'
+        if status_code == 400:
+            raise BadRequest(message, headers=response.headers)
+        if status_code == 401:
+            raise Unauthorized(message, headers=response.headers)
+        if status_code == 403:
+            raise Forbidden(message, headers=response.headers)
+        if status_code == 404:
+            raise NotFound(message, headers=response.headers)
+        if status_code == 408:
+            raise RequestTimeout(message, headers=response.headers)
+        if status_code == 429:
+            if await client._get_user_state() == "suspended":
+                raise AccountSuspended(message, headers=response.headers)
+            raise TooManyRequests(message, headers=response.headers)
+        if 500 <= status_code < 600:
+            raise ServerError(message, headers=response.headers)
+        raise TwitterException(message, headers=response.headers)
+
+    if status_code == 200:
+        return response_data, response
+    return response_data, response
+
+
+def _configure_key_byte_fallback(client: Any) -> Any:
+    if getattr(client, "_xfeed_key_byte_fallback_installed", False):
+        return client
+
+    client.get_cookies = lambda: _cookie_mapping_from_jar(client)
+    original_request = client.request
+    client._xfeed_key_byte_fallback_disabled = False
+
+    async def request_with_key_byte_fallback(
+        method: str,
+        url: str,
+        auto_unlock: bool = True,
+        raise_exception: bool = True,
+        **kwargs: Any,
+    ) -> tuple[dict[str, Any] | Any, Any]:
+        if client._xfeed_key_byte_fallback_disabled:
+            return await _request_without_transaction(
+                client,
+                method,
+                url,
+                auto_unlock=auto_unlock,
+                raise_exception=raise_exception,
+                **kwargs,
+            )
+
+        try:
+            return await original_request(
+                method,
+                url,
+                auto_unlock=auto_unlock,
+                raise_exception=raise_exception,
+                **kwargs,
+            )
+        except Exception as exc:
+            if not _is_key_byte_indices_error(exc):
+                raise
+            client._xfeed_key_byte_fallback_disabled = True
+            return await _request_without_transaction(
+                client,
+                method,
+                url,
+                auto_unlock=auto_unlock,
+                raise_exception=raise_exception,
+                **kwargs,
+            )
+
+    client.request = request_with_key_byte_fallback
+    client._xfeed_key_byte_fallback_installed = True
+    return client
 
 
 class TwikitProvider(FeedProvider):
@@ -199,7 +352,7 @@ class TwikitProvider(FeedProvider):
         if self._client is None:
             client = Client(language=self._language)
             client.set_cookies(self._cookies, clear_cookies=True)
-            self._client = client
+            self._client = _configure_key_byte_fallback(client)
         return self._client
 
     async def _get_user_by_screen_name(self, screen_name: str, *, client: Any) -> Any:
