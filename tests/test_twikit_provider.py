@@ -171,6 +171,24 @@ def test_fetch_home_finds_linked_quote_in_nested_tweet_data() -> None:
     assert page.tweets[0].quoted_tweet.text == "Nested quoted body"
 
 
+def test_fetch_home_preserves_note_tweet_text_for_show_more() -> None:
+    tweet = _make_tweet(1, author="alice", text="Short preview")
+    tweet.note_tweet = SimpleNamespace(
+        note_tweet_results=SimpleNamespace(
+            result={"text": "Short preview with the hidden continuation."}
+        )
+    )
+    client = FakeClient([tweet], {})
+    provider = TwikitProvider({})
+    provider._get_client = lambda: client  # type: ignore[method-assign]
+
+    page = asyncio.run(provider.fetch_home(FeedMode.FOR_YOU, cursor=None, count=20))
+
+    assert page.tweets[0].text == "Short preview"
+    assert page.tweets[0].full_text == "Short preview with the hidden continuation."
+    assert page.tweets[0].has_hidden_text is True
+
+
 def test_fetch_replies_uses_client_reply_endpoint_and_skips_parent_tweet() -> None:
     parent = _make_tweet(1, author="alice", text="parent")
     reply = _make_tweet(2, author="bob", text="reply")

@@ -63,7 +63,7 @@ def render_feed_list(
     return "\n".join(lines)
 
 
-def render_tweet_detail(tweet: TweetView) -> str:
+def render_tweet_detail(tweet: TweetView, *, expanded: bool = False) -> str:
     lines = [
         f"{tweet.author_name} (@{tweet.author_handle})",
         format_timestamp(tweet.created_at),
@@ -76,7 +76,11 @@ def render_tweet_detail(tweet: TweetView) -> str:
     if tweet.in_reply_to:
         lines.append(f"Replying to {tweet.in_reply_to}")
         lines.append("")
-    lines.append(tweet.text or "[no text]")
+    body = tweet.full_text if expanded and tweet.full_text else tweet.text
+    lines.append(body or "[no text]")
+    if tweet.has_hidden_text:
+        lines.append("")
+        lines.append("m collapse" if expanded else "m show more")
     lines.append("")
     lines.append(_format_counts(tweet))
     if tweet.media:
@@ -101,6 +105,7 @@ def render_reply_detail(
     *,
     reply_index: int = 0,
     loaded_reply_count: int = 0,
+    expanded: bool = False,
 ) -> str:
     lines = [
         f"Replies to {source_tweet.author_name} (@{source_tweet.author_handle})",
@@ -112,7 +117,7 @@ def render_reply_detail(
 
     lines.append(f"Reply {reply_index + 1} of {max(loaded_reply_count, reply_index + 1)} loaded")
     lines.append("")
-    lines.append(render_tweet_detail(reply))
+    lines.append(render_tweet_detail(reply, expanded=expanded))
     return "\n".join(lines)
 
 

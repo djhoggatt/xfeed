@@ -28,13 +28,11 @@ def build_parser() -> argparse.ArgumentParser:
     )
     subparsers = parser.add_subparsers(dest="command", required=True)
 
-    auth_parser = subparsers.add_parser("auth", help="Manage the local X session.")
-    auth_subparsers = auth_parser.add_subparsers(dest="auth_command", required=True)
-    auth_import = auth_subparsers.add_parser(
+    import_cookies = subparsers.add_parser(
         "import-cookies",
         help="Import browser-exported cookies into the local session store.",
     )
-    auth_import.add_argument("path", help="Path to a cookie export file.")
+    import_cookies.add_argument("path", help="Path to a cookie export file.")
 
     home = subparsers.add_parser("home", help="Read the home timeline.")
     home.add_argument(
@@ -104,7 +102,7 @@ def main(argv: list[str] | None = None) -> int:
 
 
 def dispatch(args: argparse.Namespace) -> int:
-    if args.command == "auth" and args.auth_command == "import-cookies":
+    if args.command == "import-cookies":
         cookies = load_cookie_mapping(args.path)
         session_path = SessionStore().save_cookies(cookies)
         print(f"Saved {len(cookies)} cookies to {session_path}")

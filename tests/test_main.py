@@ -3,6 +3,15 @@ from io import StringIO
 from xfeed.main import build_parser, reset_terminal_display
 
 
+def test_import_cookies_command_parses_path() -> None:
+    parser = build_parser()
+
+    args = parser.parse_args(["import-cookies", "/tmp/cookies.json"])
+
+    assert args.command == "import-cookies"
+    assert args.path == "/tmp/cookies.json"
+
+
 def test_user_command_parses_screen_name_and_feed() -> None:
     parser = build_parser()
 

@@ -30,7 +30,7 @@ Log into X on a browser, and export the cookies using a browser extension.
 Import them:
 
 ```bash
-xfeed auth import-cookies ~/Downloads/cookies.json
+xfeed import-cookies ~/Downloads/cookies.json
 ```
 
 Supported import formats:
@@ -83,6 +83,7 @@ xfeed user nasa --feed media --plain
 - `Left` / `Right`: move between loaded replies while in reply mode
 - `Backspace`: go back one reply level
 - `Esc`: exit reply mode entirely
+- `m`: expand or collapse hidden tweet text when available
 - `i`: display the selected tweet's first image with `kitten icat`
 - `o`: open the selected tweet in a browser
 - `q`: quit

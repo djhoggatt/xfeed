@@ -154,6 +154,28 @@ def test_render_tweet_detail_renders_embedded_quoted_tweet() -> None:
     assert "https://x.com/bob/status/2" in rendered
 
 
+def test_render_tweet_detail_can_toggle_hidden_text() -> None:
+    tweet = TweetView(
+        id="1",
+        author_name="Alice",
+        author_handle="alice",
+        text="Short preview",
+        full_text="Short preview with the hidden continuation.",
+        has_hidden_text=True,
+        created_at="Fri, 13 Mar 2026 12:00:00 +0000",
+        url="https://x.com/alice/status/1",
+    )
+
+    collapsed = render_tweet_detail(tweet)
+    expanded = render_tweet_detail(tweet, expanded=True)
+
+    assert "Short preview" in collapsed
+    assert "hidden continuation" not in collapsed
+    assert "m show more" in collapsed
+    assert "Short preview with the hidden continuation." in expanded
+    assert "m collapse" in expanded
+
+
 def test_render_reply_detail_includes_header_and_position() -> None:
     source = TweetView(
         id="1",

@@ -27,6 +27,28 @@ class FakeController:
             )
             for index in range(tweet_count)
         ]
+        self._tweet_details = {
+            tweet.id: TweetView(
+                id=tweet.id,
+                author_name=tweet.author_name,
+                author_handle=tweet.author_handle,
+                text=tweet.text,
+                created_at=tweet.created_at,
+                url=tweet.url,
+                full_text=tweet.full_text,
+                has_hidden_text=tweet.has_hidden_text,
+                reply_count=tweet.reply_count,
+                retweet_count=tweet.retweet_count,
+                like_count=tweet.like_count,
+                quote_count=tweet.quote_count,
+                lang=tweet.lang,
+                media=list(tweet.media),
+                quoted_tweet=tweet.quoted_tweet,
+                retweeted_by=tweet.retweeted_by,
+                in_reply_to=tweet.in_reply_to,
+            )
+            for tweet in self.tweets
+        }
         self.load_more_calls = 0
         self.reply_calls: list[tuple[str, str | None]] = []
 
@@ -42,6 +64,9 @@ class FakeController:
 
     async def toggle_view(self) -> str:
         return "mode"
+
+    async def fetch_tweet(self, tweet_id: str) -> TweetView:
+        return self._tweet_details[tweet_id]
 
     async def fetch_replies(self, tweet_id: str, *, cursor: str | None = None) -> FeedPage:
         self.reply_calls.append((tweet_id, cursor))
@@ -266,5 +291,51 @@ def test_enter_without_replies_does_not_enter_reply_mode() -> None:
             assert controller.reply_calls == [("0", None)]
             assert app._reply_mode is False
             assert app._status.endswith("No replies found for @user0.")
+
+    asyncio.run(scenario())
+
+
+def test_m_expands_hidden_text_after_fetching_tweet_detail() -> None:
+    async def scenario() -> None:
+        controller = FakeController()
+        controller.tweets[0] = TweetView(
+            id="0",
+            author_name="Author",
+            author_handle="user0",
+            text="Short preview",
+            created_at="Fri, 13 Mar 2026 12:00:00 +0000",
+            url="https://x.com/user0/status/0",
+        )
+        controller._tweet_details["0"] = TweetView(
+            id="0",
+            author_name="Author",
+            author_handle="user0",
+            text="Short preview",
+            full_text="Short preview with the hidden continuation.",
+            has_hidden_text=True,
+            created_at="Fri, 13 Mar 2026 12:00:00 +0000",
+            url="https://x.com/user0/status/0",
+        )
+        app = FeedApp(controller)
+        async with app.run_test(size=(100, 14)) as pilot:
+            await pilot.pause()
+            await pilot.pause()
+
+            rendered = str(app.query_one("#tweet-detail").renderable)
+            assert "hidden continuation" not in rendered
+
+            await pilot.press("m")
+            await pilot.pause()
+
+            rendered = str(app.query_one("#tweet-detail").renderable)
+            assert "Short preview with the hidden continuation." in rendered
+            assert "m collapse" in rendered
+
+            await pilot.press("m")
+            await pilot.pause()
+
+            rendered = str(app.query_one("#tweet-detail").renderable)
+            assert "hidden continuation" not in rendered
+            assert "m show more" in rendered
 
     asyncio.run(scenario())

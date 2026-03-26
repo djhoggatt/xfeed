@@ -94,6 +94,7 @@ class FeedApp(App[None]):
         Binding("left", "previous_reply", "Previous reply", show=False),
         Binding("right", "next_reply", "Next reply", show=False),
         Binding("i", "show_images", "Images"),
+        Binding("m", "toggle_full_text", "More"),
         Binding("o", "open_tweet", "Open"),
     ]
 
@@ -109,6 +110,7 @@ class FeedApp(App[None]):
         self._reply_tweets: list[TweetView] = []
         self._reply_index = 0
         self._reply_stack: list[ReplyContext] = []
+        self._expanded_tweet_ids: set[str] = set()
 
     def compose(self) -> ComposeResult:
         yield Static(id="topbar", classes="bar")
@@ -282,6 +284,33 @@ class FeedApp(App[None]):
         self._status = self._status_line(f"Opened {tweet.url}")
         self._render()
 
+    async def action_toggle_full_text(self) -> None:
+        tweet = self._active_tweet()
+        if tweet is None:
+            return
+        if tweet.id in self._expanded_tweet_ids:
+            self._expanded_tweet_ids.remove(tweet.id)
+            self._status = self._status_line(
+                f"Collapsed extra text for @{tweet.author_handle}."
+            )
+            self._render()
+            return
+        try:
+            tweet = await self._ensure_tweet_has_full_text(tweet)
+        except Exception as exc:  # pragma: no cover - runtime dependency path
+            self._status = f"Error: {exc}"
+            self._render()
+            return
+        if not tweet.has_hidden_text or not tweet.full_text:
+            self._status = self._status_line("No additional text available.")
+            self._render()
+            return
+        self._expanded_tweet_ids.add(tweet.id)
+        self._status = self._status_line(
+            f"Expanded extra text for @{tweet.author_handle}."
+        )
+        self._render()
+
     def action_show_images(self) -> None:
         if time.monotonic() < self._image_view_cooldown_until:
             return
@@ -350,6 +379,7 @@ class FeedApp(App[None]):
                     reply,
                     reply_index=self._reply_index,
                     loaded_reply_count=len(self._reply_tweets),
+                    expanded=self._is_expanded(reply),
                 )
                 if source_tweet is not None
                 else "No tweet selected."
@@ -357,17 +387,19 @@ class FeedApp(App[None]):
         else:
             tweet = self._current_feed_tweet()
             detail_widget.update(
-                render_tweet_detail(tweet) if tweet is not None else "No tweet selected."
+                render_tweet_detail(tweet, expanded=self._is_expanded(tweet))
+                if tweet is not None
+                else "No tweet selected."
             )
         status_widget.update(self._status)
         if self._reply_mode:
             helpbar_widget.update(
-                "left prev  right next  enter replies  backspace up  esc exit  i images  o open  q quit"
+                "left prev  right next  enter replies  backspace up  esc exit  m more  i images  o open  q quit"
             )
         else:
             helpbar_widget.update(
                 "j/k move  p newer  n older  r refresh  "
-                f"f {self.controller.toggle_label}  enter replies  i images  o open  q quit"
+                f"f {self.controller.toggle_label}  enter replies  m more  i images  o open  q quit"
             )
 
     def _active_tweet(self) -> TweetView | None:
@@ -393,6 +425,11 @@ class FeedApp(App[None]):
 
     def _status_line(self, message: str) -> str:
         return f"{self.controller.status_label} | {len(self.controller.tweets)} tweets | {message}"
+
+    def _is_expanded(self, tweet: TweetView | None) -> bool:
+        if tweet is None:
+            return False
+        return tweet.id in self._expanded_tweet_ids
 
     def _page_size(self) -> int:
         list_widget = self.query_one("#feed-list", Static)
@@ -437,6 +474,29 @@ class FeedApp(App[None]):
         self._status = self._status_line(
             f"Showing reply 1 of {len(self._reply_tweets)} for @{tweet.author_handle}."
         )
+
+    async def _ensure_tweet_has_full_text(self, tweet: TweetView) -> TweetView:
+        if tweet.has_hidden_text and tweet.full_text:
+            return tweet
+        detailed = await self.controller.fetch_tweet(tweet.id)
+        self._replace_tweet_references(detailed)
+        return detailed
+
+    def _replace_tweet_references(self, updated: TweetView) -> None:
+        self._replace_tweet_in_list(self.controller.tweets, updated)
+        self._replace_tweet_in_list(self._reply_tweets, updated)
+        if self._reply_source_tweet is not None and self._reply_source_tweet.id == updated.id:
+            self._reply_source_tweet = updated
+        for context in self._reply_stack:
+            if context.source_tweet.id == updated.id:
+                context.source_tweet = updated
+            self._replace_tweet_in_list(context.replies, updated)
+
+    def _replace_tweet_in_list(self, tweets: list[TweetView], updated: TweetView) -> None:
+        for index, candidate in enumerate(tweets):
+            if candidate.id == updated.id:
+                tweets[index] = updated
+                return
 
     def _page_end_index(self) -> int:
         if not self.controller.tweets:

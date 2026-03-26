@@ -429,16 +429,19 @@ class TwikitProvider(FeedProvider):
                         client=client,
                         seen_ids=next_seen_ids,
                     )
-        text = getattr(normalized_target, "text", None)
-        if text is None:
-            text = getattr(normalized_target, "full_text", "")
+        visible_text = self._extract_visible_text(normalized_target)
+        full_text = self._extract_full_text(tweet, normalized_target)
+        display_text = visible_text or full_text
+        normalized_full_text = full_text if full_text and full_text != display_text else None
         return TweetView(
             id=tweet_id,
             author_name=author_name,
             author_handle=author_handle,
-            text=(text or "").strip(),
+            text=display_text,
             created_at=str(getattr(normalized_target, "created_at", "")),
             url=f"https://x.com/{author_handle}/status/{tweet_id}",
+            full_text=normalized_full_text,
+            has_hidden_text=normalized_full_text is not None,
             reply_count=int(getattr(normalized_target, "reply_count", 0) or 0),
             retweet_count=int(getattr(normalized_target, "retweet_count", 0) or 0),
             like_count=int(getattr(normalized_target, "favorite_count", 0) or 0),
@@ -522,6 +525,115 @@ class TwikitProvider(FeedProvider):
             return None
         for item in members.values():
             match = self._find_status_id(item, seen_objects, depth=depth + 1)
+            if match is not None:
+                return match
+        return None
+
+    def _extract_visible_text(self, tweet: Any) -> str:
+        text = getattr(tweet, "text", None)
+        if text is None:
+            text = getattr(tweet, "full_text", "")
+        return (text or "").strip()
+
+    def _extract_full_text(self, *tweet_candidates: Any) -> str:
+        note_tweet_text = self._extract_note_tweet_text(*tweet_candidates)
+        if note_tweet_text:
+            return note_tweet_text
+        for candidate in tweet_candidates:
+            text = self._extract_visible_text(candidate)
+            if text:
+                return text
+        return ""
+
+    def _extract_note_tweet_text(self, *tweet_candidates: Any) -> str | None:
+        for candidate in tweet_candidates:
+            for root in self._note_tweet_roots(candidate):
+                text = self._find_note_tweet_text(root, set(), depth=0)
+                if text:
+                    return text
+        return None
+
+    def _note_tweet_roots(self, candidate: Any) -> list[Any]:
+        if candidate is None:
+            return []
+        roots: list[Any] = []
+        if isinstance(candidate, dict):
+            for key in ("note_tweet", "note_tweet_results"):
+                value = candidate.get(key)
+                if value is not None:
+                    roots.append(value)
+            legacy = candidate.get("legacy")
+        else:
+            for attr in ("note_tweet", "note_tweet_results"):
+                value = getattr(candidate, attr, None)
+                if value is not None:
+                    roots.append(value)
+            legacy = getattr(candidate, "legacy", None)
+        if legacy is not None:
+            roots.extend(self._note_tweet_roots(legacy))
+        return roots
+
+    def _find_note_tweet_text(
+        self,
+        value: Any,
+        seen_objects: set[int],
+        *,
+        depth: int,
+    ) -> str | None:
+        if value is None or depth > 12:
+            return None
+        if isinstance(value, str):
+            return None
+        if isinstance(value, (int, float, bool, bytes)):
+            return None
+
+        object_id = id(value)
+        if object_id in seen_objects:
+            return None
+        seen_objects.add(object_id)
+
+        if isinstance(value, dict):
+            direct_text = value.get("text")
+            if isinstance(direct_text, str) and direct_text.strip():
+                return direct_text.strip()
+            for key in ("result", "note_tweet_results", "note_tweet", "legacy"):
+                match = self._find_note_tweet_text(
+                    value.get(key),
+                    seen_objects,
+                    depth=depth + 1,
+                )
+                if match is not None:
+                    return match
+            for item in value.values():
+                match = self._find_note_tweet_text(item, seen_objects, depth=depth + 1)
+                if match is not None:
+                    return match
+            return None
+
+        if isinstance(value, (list, tuple, set)):
+            for item in value:
+                match = self._find_note_tweet_text(item, seen_objects, depth=depth + 1)
+                if match is not None:
+                    return match
+            return None
+
+        direct_text = getattr(value, "text", None)
+        if isinstance(direct_text, str) and direct_text.strip():
+            return direct_text.strip()
+        for attr in ("result", "note_tweet_results", "note_tweet", "legacy"):
+            match = self._find_note_tweet_text(
+                getattr(value, attr, None),
+                seen_objects,
+                depth=depth + 1,
+            )
+            if match is not None:
+                return match
+        try:
+            members = vars(value)
+        except TypeError:
+            return None
+        for item in members.values():
+            match = self._find_note_tweet_text(item, seen_objects, depth=depth + 1)
             if match is not None:
                 return match
         return None

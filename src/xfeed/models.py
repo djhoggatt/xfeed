@@ -63,6 +63,8 @@ class TweetView:
     text: str
     created_at: str
     url: str
+    full_text: str | None = None
+    has_hidden_text: bool = False
     reply_count: int = 0
     retweet_count: int = 0
     like_count: int = 0
