@@ -7,6 +7,79 @@ from typing import Any
 from xfeed.models import FeedMode, FeedPage, MediaItem, TweetView, UserTweetType
 from xfeed.providers.base import FeedProvider, ProviderError
 
+_USER_LEGACY_DEFAULTS: dict[str, Any] = {
+    "created_at": "",
+    "name": "",
+    "screen_name": "",
+    "profile_image_url_https": "",
+    "location": "",
+    "description": "",
+    "verified": False,
+    "possibly_sensitive": False,
+    "can_dm": False,
+    "can_media_tag": False,
+    "want_retweets": False,
+    "default_profile": False,
+    "default_profile_image": False,
+    "has_custom_timelines": False,
+    "followers_count": 0,
+    "fast_followers_count": 0,
+    "normal_followers_count": 0,
+    "friends_count": 0,
+    "favourites_count": 0,
+    "listed_count": 0,
+    "media_count": 0,
+    "statuses_count": 0,
+    "is_translator": False,
+    "translator_type": "",
+    "withheld_in_countries": [],
+    "pinned_tweet_ids_str": [],
+}
+
+
+def _patch_twikit_users() -> None:
+    """Patch twikit User constructors to tolerate missing fields in API responses.
+
+    X/Twitter occasionally omits fields from legacy user objects. Twikit uses
+    bare dict access for most of them, so we pre-fill defaults before the
+    original __init__ runs. This survives pip/pipx reinstalls because it lives
+    in xfeed's code rather than in twikit's installed files.
+    """
+    try:
+        import twikit.user as _u
+        import twikit.guest.user as _gu
+    except ImportError:
+        return
+    for cls in (_u.User, _gu.User):
+        _wrap_user_init(cls)
+
+
+def _wrap_user_init(cls: Any) -> None:
+    original = cls.__init__
+    if getattr(original, "_xfeed_patched", False):
+        return
+
+    def _safe_init(self: Any, client: Any, data: dict) -> None:
+        data = dict(data)
+        legacy = dict(data.get("legacy") or {})
+        for key, default in _USER_LEGACY_DEFAULTS.items():
+            if key not in legacy:
+                legacy[key] = default
+        entities = dict(legacy.get("entities") or {})
+        desc = dict(entities.get("description") or {})
+        if "urls" not in desc:
+            desc["urls"] = []
+        entities["description"] = desc
+        legacy["entities"] = entities
+        if "is_blue_verified" not in data:
+            data["is_blue_verified"] = False
+        data["legacy"] = legacy
+        original(self, client, data)
+
+    _safe_init._xfeed_patched = True  # type: ignore[attr-defined]
+    cls.__init__ = _safe_init
+
+
 try:
     from twikit import Client
     from twikit.errors import (
@@ -23,6 +96,7 @@ try:
     )
     from twikit.tweet import tweet_from_data
     from twikit.utils import find_dict
+    _patch_twikit_users()
 except ImportError:  # pragma: no cover - exercised only when dependency is missing
     Client = None
     AccountLocked = None
@@ -76,8 +150,8 @@ async def _request_without_transaction(
     except json.decoder.JSONDecodeError:
         response_data = response.text
 
-    if isinstance(response_data, dict) and "errors" in response_data:
-        error_code = response_data["errors"][0]["code"]
+    if isinstance(response_data, dict) and response_data.get("errors"):
+        error_code = response_data["errors"][0].get("code")
         error_message = response_data["errors"][0].get("message")
         if error_code in (37, 64):
             raise AccountSuspended(error_message)
