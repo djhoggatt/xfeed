@@ -14,7 +14,12 @@ from xfeed.media import (
     wait_for_keypress,
 )
 from xfeed.models import TweetView
-from xfeed.render import render_feed_list, render_reply_detail, render_tweet_detail
+from xfeed.render import (
+    render_feed_list,
+    render_quote_detail,
+    render_reply_detail,
+    render_tweet_detail,
+)
 
 try:
     from textual.app import App, ComposeResult
@@ -32,6 +37,12 @@ class ReplyContext:
     source_tweet: TweetView
     replies: list[TweetView]
     index: int
+
+
+@dataclass(slots=True)
+class QuoteContext:
+    source_tweet: TweetView
+    quoted_tweet: TweetView
 
 
 class FeedApp(App[None]):
@@ -89,6 +100,7 @@ class FeedApp(App[None]):
         Binding("r", "refresh_feed", "Refresh"),
         Binding("f", "toggle_mode", "Mode"),
         Binding("enter", "toggle_replies", "Replies", show=False),
+        Binding("v", "view_quote", "Quote"),
         Binding("backspace", "reply_back", "Back", show=False),
         Binding("escape", "exit_reply_mode", "Exit", show=False),
         Binding("left", "previous_reply", "Previous reply", show=False),
@@ -110,15 +122,19 @@ class FeedApp(App[None]):
         self._reply_tweets: list[TweetView] = []
         self._reply_index = 0
         self._reply_stack: list[ReplyContext] = []
+        self._quote_mode = False
+        self._quote_source_tweet: TweetView | None = None
+        self._quote_tweet: TweetView | None = None
+        self._quote_stack: list[QuoteContext] = []
         self._expanded_tweet_ids: set[str] = set()
 
     def compose(self) -> ComposeResult:
-        yield Static(id="topbar", classes="bar")
+        yield Static(id="topbar", classes="bar", markup=False)
         with Horizontal(id="body"):
-            yield Static(id="feed-list")
-            yield Static(id="tweet-detail")
-        yield Static(id="status")
-        yield Static(id="helpbar", classes="bar")
+            yield Static(id="feed-list", markup=False)
+            yield Static(id="tweet-detail", markup=False)
+        yield Static(id="status", markup=False)
+        yield Static(id="helpbar", classes="bar", markup=False)
 
     async def on_mount(self) -> None:
         try:
@@ -129,22 +145,22 @@ class FeedApp(App[None]):
         self._render()
 
     def action_move_down(self) -> None:
-        if self._reply_mode:
+        if self._detail_mode:
             return
         if self.selected_index < self._page_end_index():
             self.selected_index += 1
             self._render()
 
     def action_move_up(self) -> None:
-        if self._reply_mode:
+        if self._detail_mode:
             return
         if self.selected_index > self._page_start:
             self.selected_index -= 1
             self._render()
 
     async def action_load_more(self) -> None:
-        if self._reply_mode:
-            self._status = self._status_line("Use Left/Right to navigate replies.")
+        if self._detail_mode:
+            self._status = self._status_line(self._detail_mode_navigation_message())
             self._render()
             return
         page_size = self._page_size()
@@ -172,8 +188,8 @@ class FeedApp(App[None]):
         self._render()
 
     def action_load_previous(self) -> None:
-        if self._reply_mode:
-            self._status = self._status_line("Use Left/Right to navigate replies.")
+        if self._detail_mode:
+            self._status = self._status_line(self._detail_mode_navigation_message())
             self._render()
             return
         page_size = self._page_size()
@@ -186,8 +202,10 @@ class FeedApp(App[None]):
         self._render()
 
     async def action_refresh_feed(self) -> None:
-        if self._reply_mode:
-            self._status = self._status_line("Exit reply mode to refresh the feed.")
+        if self._detail_mode:
+            self._status = self._status_line(
+                f"Exit {self._detail_mode_label} mode to refresh the feed."
+            )
             self._render()
             return
         try:
@@ -203,9 +221,9 @@ class FeedApp(App[None]):
         self._render()
 
     async def action_toggle_mode(self) -> None:
-        if self._reply_mode:
+        if self._detail_mode:
             self._status = self._status_line(
-                f"Exit reply mode to switch {self.controller.toggle_label}."
+                f"Exit {self._detail_mode_label} mode to switch {self.controller.toggle_label}."
             )
             self._render()
             return
@@ -223,12 +241,55 @@ class FeedApp(App[None]):
         if tweet is None:
             return
         try:
+            was_quote_mode = self._quote_mode
             await self._enter_reply_context(tweet)
+            if (
+                was_quote_mode
+                and self._reply_mode
+                and self._reply_source_tweet is not None
+                and self._reply_source_tweet.id == tweet.id
+                and self._reply_tweets
+            ):
+                self._exit_quote_mode()
         except Exception as exc:  # pragma: no cover - runtime dependency path
             self._status = f"Error: {exc}"
         self._render()
 
+    async def action_view_quote(self) -> None:
+        tweet = self._active_tweet()
+        if tweet is None:
+            return
+        try:
+            tweet = await self._ensure_tweet_has_quote(tweet)
+        except Exception as exc:  # pragma: no cover - runtime dependency path
+            self._status = f"Error: {exc}"
+            self._render()
+            return
+        if tweet.quoted_tweet is None:
+            self._status = self._status_line(
+                f"No quoted tweet found for @{tweet.author_handle}."
+            )
+            self._render()
+            return
+        if self._quote_mode and self._quote_source_tweet and self._quote_tweet:
+            self._quote_stack.append(
+                QuoteContext(
+                    source_tweet=self._quote_source_tweet,
+                    quoted_tweet=self._quote_tweet,
+                )
+            )
+        self._quote_mode = True
+        self._quote_source_tweet = tweet
+        self._quote_tweet = tweet.quoted_tweet
+        self._status = self._status_line(
+            f"Showing quoted tweet from @{tweet.quoted_tweet.author_handle}."
+        )
+        self._render()
+
     def action_reply_back(self) -> None:
+        if self._quote_mode:
+            self._quote_back()
+            return
         if not self._reply_mode:
             return
         if self._reply_stack:
@@ -244,6 +305,11 @@ class FeedApp(App[None]):
         self.action_exit_reply_mode()
 
     def action_exit_reply_mode(self) -> None:
+        if self._quote_mode:
+            self._exit_quote_mode()
+            self._status = self._status_line("Exited quote mode.")
+            self._render()
+            return
         if not self._reply_mode:
             return
         self._reply_mode = False
@@ -255,7 +321,7 @@ class FeedApp(App[None]):
         self._render()
 
     def action_previous_reply(self) -> None:
-        if not self._reply_mode:
+        if self._quote_mode or not self._reply_mode:
             return
         if self._reply_index <= 0:
             return
@@ -266,7 +332,7 @@ class FeedApp(App[None]):
         self._render()
 
     async def action_next_reply(self) -> None:
-        if not self._reply_mode:
+        if self._quote_mode or not self._reply_mode:
             return
         if self._reply_index + 1 >= len(self._reply_tweets):
             return
@@ -351,9 +417,15 @@ class FeedApp(App[None]):
             f"  ·  {self.controller.title}"
             f"  ·  {len(self.controller.tweets)} tweets"
             + (
+                "  ·  quote"
+                f"  ·  depth {len(self._quote_stack) + 1}"
+                if self._quote_mode
+                else ""
+            )
+            + (
                 f"  ·  replies {len(self._reply_tweets)}"
                 f"  ·  depth {len(self._reply_stack) + 1}"
-                if self._reply_mode
+                if self._reply_mode and not self._quote_mode
                 else ""
             )
         )
@@ -370,7 +442,19 @@ class FeedApp(App[None]):
                 max_items=page_size,
             )
         )
-        if self._reply_mode:
+        if self._quote_mode:
+            source_tweet = self._quote_source_tweet
+            quoted_tweet = self._quote_tweet
+            detail_widget.update(
+                render_quote_detail(
+                    source_tweet,
+                    quoted_tweet,
+                    expanded=self._is_expanded(quoted_tweet),
+                )
+                if source_tweet is not None and quoted_tweet is not None
+                else "No quoted tweet selected."
+            )
+        elif self._reply_mode:
             source_tweet = self._reply_source_tweet or self._current_feed_tweet()
             reply = self._current_reply_tweet()
             detail_widget.update(
@@ -392,17 +476,23 @@ class FeedApp(App[None]):
                 else "No tweet selected."
             )
         status_widget.update(self._status)
-        if self._reply_mode:
+        if self._quote_mode:
             helpbar_widget.update(
-                "left prev  right next  enter replies  backspace up  esc exit  m more  i images  o open  q quit"
+                "v nested quote  enter replies  backspace back  esc exit  m more  i images  o open  q quit"
+            )
+        elif self._reply_mode:
+            helpbar_widget.update(
+                "left prev  right next  enter replies  v quote  backspace up  esc exit  m more  i images  o open  q quit"
             )
         else:
             helpbar_widget.update(
                 "j/k move  p newer  n older  r refresh  "
-                f"f {self.controller.toggle_label}  enter replies  m more  i images  o open  q quit"
+                f"f {self.controller.toggle_label}  enter replies  v quote  m more  i images  o open  q quit"
             )
 
     def _active_tweet(self) -> TweetView | None:
+        if self._quote_mode:
+            return self._quote_tweet
         if self._reply_mode:
             if self._reply_tweets:
                 self._reply_index = self._clamp_reply_index(self._reply_index)
@@ -482,15 +572,31 @@ class FeedApp(App[None]):
         self._replace_tweet_references(detailed)
         return detailed
 
+    async def _ensure_tweet_has_quote(self, tweet: TweetView) -> TweetView:
+        if tweet.quoted_tweet is not None:
+            return tweet
+        detailed = await self.controller.fetch_tweet(tweet.id)
+        self._replace_tweet_references(detailed)
+        return detailed
+
     def _replace_tweet_references(self, updated: TweetView) -> None:
         self._replace_tweet_in_list(self.controller.tweets, updated)
         self._replace_tweet_in_list(self._reply_tweets, updated)
         if self._reply_source_tweet is not None and self._reply_source_tweet.id == updated.id:
             self._reply_source_tweet = updated
+        if self._quote_source_tweet is not None and self._quote_source_tweet.id == updated.id:
+            self._quote_source_tweet = updated
+        if self._quote_tweet is not None and self._quote_tweet.id == updated.id:
+            self._quote_tweet = updated
         for context in self._reply_stack:
             if context.source_tweet.id == updated.id:
                 context.source_tweet = updated
             self._replace_tweet_in_list(context.replies, updated)
+        for context in self._quote_stack:
+            if context.source_tweet.id == updated.id:
+                context.source_tweet = updated
+            if context.quoted_tweet.id == updated.id:
+                context.quoted_tweet = updated
 
     def _replace_tweet_in_list(self, tweets: list[TweetView], updated: TweetView) -> None:
         for index, candidate in enumerate(tweets):
@@ -521,3 +627,36 @@ class FeedApp(App[None]):
         if not self._reply_tweets:
             return 0
         return max(0, min(selected_index, len(self._reply_tweets) - 1))
+
+    @property
+    def _detail_mode(self) -> bool:
+        return self._reply_mode or self._quote_mode
+
+    @property
+    def _detail_mode_label(self) -> str:
+        return "quote" if self._quote_mode else "reply"
+
+    def _detail_mode_navigation_message(self) -> str:
+        if self._quote_mode:
+            return "Exit quote mode to navigate the feed."
+        return "Use Left/Right to navigate replies."
+
+    def _quote_back(self) -> None:
+        if self._quote_stack:
+            context = self._quote_stack.pop()
+            self._quote_source_tweet = context.source_tweet
+            self._quote_tweet = context.quoted_tweet
+            self._status = self._status_line(
+                f"Back to quoted tweet from @{context.quoted_tweet.author_handle}."
+            )
+            self._render()
+            return
+        self._exit_quote_mode()
+        self._status = self._status_line("Exited quote mode.")
+        self._render()
+
+    def _exit_quote_mode(self) -> None:
+        self._quote_mode = False
+        self._quote_source_tweet = None
+        self._quote_tweet = None
+        self._quote_stack.clear()

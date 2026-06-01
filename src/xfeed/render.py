@@ -121,6 +121,21 @@ def render_reply_detail(
     return "\n".join(lines)
 
 
+def render_quote_detail(
+    source_tweet: TweetView,
+    quoted_tweet: TweetView,
+    *,
+    expanded: bool = False,
+) -> str:
+    lines = [
+        f"Quote from {source_tweet.author_name} (@{source_tweet.author_handle})",
+        source_tweet.url,
+        "",
+        render_tweet_detail(quoted_tweet, expanded=expanded),
+    ]
+    return "\n".join(lines)
+
+
 def format_media_summary(tweet: TweetView) -> str:
     if not tweet.media:
         return "·"

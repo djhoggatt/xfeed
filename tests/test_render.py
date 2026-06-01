@@ -3,6 +3,7 @@ from xfeed.render import (
     format_media_summary,
     render_feed_list,
     render_plain_feed,
+    render_quote_detail,
     render_reply_detail,
     render_tweet_detail,
 )
@@ -232,3 +233,29 @@ def test_render_reply_detail_keeps_full_reply_text() -> None:
     )
 
     assert reply.text in rendered
+
+
+def test_render_quote_detail_includes_source_and_quoted_tweet() -> None:
+    source = TweetView(
+        id="1",
+        author_name="Alice",
+        author_handle="alice",
+        text="Source tweet",
+        created_at="Fri, 13 Mar 2026 12:00:00 +0000",
+        url="https://x.com/alice/status/1",
+    )
+    quoted = TweetView(
+        id="2",
+        author_name="Bob",
+        author_handle="bob",
+        text="Quoted body",
+        created_at="Fri, 13 Mar 2026 12:05:00 +0000",
+        url="https://x.com/bob/status/2",
+    )
+
+    rendered = render_quote_detail(source, quoted)
+
+    assert "Quote from Alice (@alice)" in rendered
+    assert "https://x.com/alice/status/1" in rendered
+    assert "Bob (@bob)" in rendered
+    assert "Quoted body" in rendered

@@ -80,9 +80,10 @@ xfeed user nasa --feed media --plain
 - `r`: refresh newer tweets
 - `f`: toggle timeline mode or user feed type
 - `Enter`: enter reply mode for the selected tweet or reply
+- `v`: view the selected tweet's quoted tweet when available
 - `Left` / `Right`: move between loaded replies while in reply mode
-- `Backspace`: go back one reply level
-- `Esc`: exit reply mode entirely
+- `Backspace`: go back one reply or quoted-tweet level
+- `Esc`: exit reply or quoted-tweet mode
 - `m`: expand or collapse hidden tweet text when available
 - `i`: display the selected tweet's first image with `kitten icat`
 - `o`: open the selected tweet in a browser

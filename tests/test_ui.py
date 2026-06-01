@@ -11,6 +11,10 @@ pytest.importorskip("textual")
 from xfeed.ui import FeedApp
 
 
+def widget_text(app: FeedApp, selector: str) -> str:
+    return str(app.query_one(selector).content)
+
+
 class FakeController:
     def __init__(self, tweet_count: int = 30) -> None:
         self.title = "test"
@@ -133,8 +137,7 @@ def test_feed_list_pages_older_and_newer() -> None:
             await pilot.pause()
             assert app.selected_index == page_size
 
-            rendered = app.query_one("#feed-list").renderable
-            rendered_text = str(rendered)
+            rendered_text = widget_text(app, "#feed-list")
             assert "@user0" not in rendered_text
             assert f"@user{page_size}" in rendered_text
 
@@ -160,7 +163,7 @@ def test_reply_mode_flips_detail_pane_and_steps_replies() -> None:
 
             assert app._reply_mode is True
             assert controller.reply_calls == [("0", None)]
-            rendered = str(app.query_one("#tweet-detail").renderable)
+            rendered = widget_text(app, "#tweet-detail")
             assert "Replies to Author (@user0)" in rendered
             assert "Reply 1 of 3 loaded" in rendered
             assert "Reply 0 (@reply0)" in rendered
@@ -168,7 +171,7 @@ def test_reply_mode_flips_detail_pane_and_steps_replies() -> None:
             await pilot.press("right")
             await pilot.pause()
             assert app._reply_index == 1
-            rendered = str(app.query_one("#tweet-detail").renderable)
+            rendered = widget_text(app, "#tweet-detail")
             assert "Reply 1 (@reply1)" in rendered
 
             await pilot.press("right")
@@ -179,13 +182,13 @@ def test_reply_mode_flips_detail_pane_and_steps_replies() -> None:
             await pilot.pause()
             assert controller.reply_calls == [("0", None)]
             assert app._reply_index == 2
-            rendered = str(app.query_one("#tweet-detail").renderable)
+            rendered = widget_text(app, "#tweet-detail")
             assert "Reply 2 (@reply2)" in rendered
 
             await pilot.press("left")
             await pilot.pause()
             assert app._reply_index == 1
-            rendered = str(app.query_one("#tweet-detail").renderable)
+            rendered = widget_text(app, "#tweet-detail")
             assert "Reply 1 (@reply1)" in rendered
 
             await pilot.press("left")
@@ -198,7 +201,7 @@ def test_reply_mode_flips_detail_pane_and_steps_replies() -> None:
             await pilot.pause()
 
             assert app._reply_mode is False
-            rendered = str(app.query_one("#tweet-detail").renderable)
+            rendered = widget_text(app, "#tweet-detail")
             assert "tweet 0" in rendered
 
     asyncio.run(scenario())
@@ -228,7 +231,7 @@ def test_enter_on_reply_drills_into_nested_replies_and_escape_pops_stack() -> No
             assert controller.reply_calls == [("0", None), ("0-reply-1", None)]
             assert app._reply_mode is True
             assert len(app._reply_stack) == 1
-            rendered = str(app.query_one("#tweet-detail").renderable)
+            rendered = widget_text(app, "#tweet-detail")
             assert "Replies to Reply 1 (@reply1)" in rendered
             assert "Reply 1 of 3 loaded" in rendered
             assert "Reply 0 (@reply0)" in rendered
@@ -239,7 +242,7 @@ def test_enter_on_reply_drills_into_nested_replies_and_escape_pops_stack() -> No
             assert app._reply_mode is True
             assert len(app._reply_stack) == 0
             assert app._reply_index == 1
-            rendered = str(app.query_one("#tweet-detail").renderable)
+            rendered = widget_text(app, "#tweet-detail")
             assert "Replies to Author (@user0)" in rendered
             assert "Reply 1 (@reply1)" in rendered
 
@@ -270,7 +273,7 @@ def test_escape_exits_reply_mode_entirely_from_nested_reply() -> None:
 
             assert app._reply_mode is False
             assert len(app._reply_stack) == 0
-            rendered = str(app.query_one("#tweet-detail").renderable)
+            rendered = widget_text(app, "#tweet-detail")
             assert "tweet 0" in rendered
 
     asyncio.run(scenario())
@@ -291,6 +294,100 @@ def test_enter_without_replies_does_not_enter_reply_mode() -> None:
             assert controller.reply_calls == [("0", None)]
             assert app._reply_mode is False
             assert app._status.endswith("No replies found for @user0.")
+
+    asyncio.run(scenario())
+
+
+def test_v_opens_quoted_tweet_and_backspace_returns_to_feed_tweet() -> None:
+    async def scenario() -> None:
+        controller = FakeController()
+        quoted = TweetView(
+            id="quoted-1",
+            author_name="Quoted Author",
+            author_handle="quoted",
+            text="quoted tweet body",
+            created_at="Fri, 13 Mar 2026 12:05:00 +0000",
+            url="https://x.com/quoted/status/quoted-1",
+        )
+        controller.tweets[0].quoted_tweet = quoted
+        controller._tweet_details["0"].quoted_tweet = quoted
+        app = FeedApp(controller)
+        async with app.run_test(size=(100, 14)) as pilot:
+            await pilot.pause()
+            await pilot.pause()
+
+            await pilot.press("v")
+            await pilot.pause()
+
+            assert app._quote_mode is True
+            rendered = widget_text(app, "#tweet-detail")
+            assert "Quote from Author (@user0)" in rendered
+            assert "Quoted Author (@quoted)" in rendered
+            assert "quoted tweet body" in rendered
+
+            await pilot.press("backspace")
+            await pilot.pause()
+
+            assert app._quote_mode is False
+            rendered = widget_text(app, "#tweet-detail")
+            assert "tweet 0" in rendered
+            assert "Quote from Author (@user0)" not in rendered
+
+    asyncio.run(scenario())
+
+
+def test_v_fetches_tweet_detail_when_quote_is_not_loaded_yet() -> None:
+    async def scenario() -> None:
+        controller = FakeController()
+        quoted = TweetView(
+            id="quoted-1",
+            author_name="Quoted Author",
+            author_handle="quoted",
+            text="quoted tweet body",
+            created_at="Fri, 13 Mar 2026 12:05:00 +0000",
+            url="https://x.com/quoted/status/quoted-1",
+        )
+        controller._tweet_details["0"].quoted_tweet = quoted
+        app = FeedApp(controller)
+        async with app.run_test(size=(100, 14)) as pilot:
+            await pilot.pause()
+            await pilot.pause()
+
+            await pilot.press("v")
+            await pilot.pause()
+
+            assert app._quote_mode is True
+            assert controller.tweets[0].quoted_tweet is quoted
+            rendered = widget_text(app, "#tweet-detail")
+            assert "Quoted Author (@quoted)" in rendered
+
+    asyncio.run(scenario())
+
+
+def test_v_renders_quoted_tweet_text_with_markup_characters_literally() -> None:
+    async def scenario() -> None:
+        controller = FakeController()
+        quoted = TweetView(
+            id="quoted-1",
+            author_name="Quoted Author",
+            author_handle="quoted",
+            text="quoted [bold]not rich markup[/bold] body",
+            created_at="Fri, 13 Mar 2026 12:05:00 +0000",
+            url="https://x.com/quoted/status/quoted-1",
+        )
+        controller.tweets[0].quoted_tweet = quoted
+        controller._tweet_details["0"].quoted_tweet = quoted
+        app = FeedApp(controller)
+        async with app.run_test(size=(100, 14)) as pilot:
+            await pilot.pause()
+            await pilot.pause()
+
+            await pilot.press("v")
+            await pilot.pause()
+
+            assert app._quote_mode is True
+            rendered = widget_text(app, "#tweet-detail")
+            assert "[bold]not rich markup[/bold]" in rendered
 
     asyncio.run(scenario())
 
@@ -321,20 +418,20 @@ def test_m_expands_hidden_text_after_fetching_tweet_detail() -> None:
             await pilot.pause()
             await pilot.pause()
 
-            rendered = str(app.query_one("#tweet-detail").renderable)
+            rendered = widget_text(app, "#tweet-detail")
             assert "hidden continuation" not in rendered
 
             await pilot.press("m")
             await pilot.pause()
 
-            rendered = str(app.query_one("#tweet-detail").renderable)
+            rendered = widget_text(app, "#tweet-detail")
             assert "Short preview with the hidden continuation." in rendered
             assert "m collapse" in rendered
 
             await pilot.press("m")
             await pilot.pause()
 
-            rendered = str(app.query_one("#tweet-detail").renderable)
+            rendered = widget_text(app, "#tweet-detail")
             assert "hidden continuation" not in rendered
             assert "m show more" in rendered
 
